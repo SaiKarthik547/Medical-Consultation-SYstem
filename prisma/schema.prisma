@@ -1,0 +1,280 @@
+// Medical Consultation Platform - Prisma Schema
+// Production-ready with immutability, audit trails, and HIPAA-aligned principles
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum ConsultationStatus {
+  WAITLISTED // Patient in queue, waiting for doctor acceptance
+  ACCEPTED   // Doctor accepted, waiting for payment
+  PAID       // Payment completed, ready to start session
+  ACTIVE     // Doctor started session
+  COMPLETED  // Session closed
+  CANCELLED  // Cancelled before completion
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum TestStatus {
+  ORDERED
+  COMPLETED
+  CANCELLED
+}
+
+// Core user entity
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   // bcrypt hashed
+  role      UserRole
+  name      String
+  phone     String?
+  dateOfBirth DateTime?
+  gender    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  doctorProfile        DoctorProfile?
+  consultationsAsPatient ConsultationSession[] @relation("PatientConsultations")
+  consultationsAsDoctor  ConsultationSession[] @relation("DoctorConsultations")
+  chatMessages         ChatMessage[]
+  medicalReports       MedicalReport[]
+  prescriptions        Prescription[]
+  testsOrdered         DiagnosticTest[]      @relation("DoctorTests")
+  auditLogs            AuditLog[]
+  sessions             Session[]
+  paymentsAsPatient    PaymentRecord[]       @relation("PatientPayments")
+
+  @@index([email])
+  @@index([role])
+}
+
+// Doctor-specific profile with verification
+model DoctorProfile {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  registrationNumber String  @unique  // Medical registration number
+  specialization    String
+  qualifications    String   // Comma-separated or JSON
+  isVerified        Boolean  @default(false)  // CRITICAL: Blocks prescribing/ordering tests
+  verifiedAt        DateTime?
+  yearsOfExperience Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([registrationNumber])
+  @@index([isVerified])
+}
+
+// Formal medical consultation session
+model ConsultationSession {
+  id              String             @id @default(uuid())
+  patientId       String
+  patient         User               @relation("PatientConsultations", fields: [patientId], references: [id], onDelete: Cascade)
+  doctorId        String?
+  doctor          User?              @relation("DoctorConsultations", fields: [doctorId], references: [id], onDelete: SetNull)
+  status          ConsultationStatus @default(WAITLISTED)
+  chiefComplaint  String             // Patient's main concern
+  assignedAt      DateTime?          // When doctor was assigned (legacy - for admin assignment)
+  acceptedAt      DateTime?          // When doctor accepted from queue
+  acceptedBy      String?            // Doctor ID who accepted
+  paymentDueAt    DateTime?          // Payment deadline (acceptedAt + 15 minutes)
+  consentGivenAt  DateTime?          // Patient consent timestamp
+  consentIpAddress String?           // IP address when consent given
+  startedAt       DateTime?          // When doctor started session
+  endedAt         DateTime?          // When session closed
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  // Relations
+  chatMessages      ChatMessage[]
+  medicalReports    MedicalReport[]
+  prescriptions     Prescription[]
+  diagnosticTests   DiagnosticTest[]
+  payments          PaymentRecord[]
+  snapshot          ConsultationSnapshot?
+  patientConsents   PatientConsent[]
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([status, createdAt]) // Efficient queue queries
+}
+
+// Consultation snapshot for timeline optimization
+model ConsultationSnapshot {
+  id              String              @id @default(uuid())
+  consultationId  String              @unique
+  consultation    ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  chiefComplaint  String
+  finalDiagnosis  String?
+  outcomeNotes    String?
+  prescriptionIds String              // Comma-separated prescription IDs
+  testIds         String              // Comma-separated test IDs
+  createdAt       DateTime            @default(now())
+
+  @@index([consultationId])
+}
+
+// Explicit patient consent tracking
+model PatientConsent {
+  id                String              @id @default(uuid())
+  consultationId    String
+  consultation      ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  consentTextVersion String             // Version of consent text shown
+  acceptedAt        DateTime            @default(now())
+  ipAddress         String
+  userAgent         String?
+
+  @@index([consultationId])
+}
+
+// Append-only chat messages (NEVER deleted)
+model ChatMessage {
+  id              String              @id @default(uuid())
+  consultationId  String
+  consultation    ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  senderId        String
+  sender          User                @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  message         String
+  flaggedForReview Boolean            @default(false)  // For moderation, NOT deletion
+  createdAt       DateTime            @default(now())
+
+  @@index([consultationId])
+  @@index([createdAt])
+}
+
+// Immutable medical reports with integrity verification
+model MedicalReport {
+  id              String              @id @default(uuid())
+  patientId       String
+  patient         User                @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  consultationId  String?
+  consultation    ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+  title           String
+  description     String?
+  filePath        String              // Local path: /uploads/reports/[uuid].[ext]
+  fileHash        String              // SHA256 hash for integrity verification
+  fileSize        Int                 // File size in bytes
+  mimeType        String              // e.g., application/pdf, image/jpeg
+  uploadedAt      DateTime            @default(now())
+
+  @@index([patientId])
+  @@index([consultationId])
+  @@index([uploadedAt])
+}
+
+// Versioned prescriptions (immutable, new versions for changes)
+model Prescription {
+  id                String              @id @default(uuid())
+  consultationId    String
+  consultation      ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  doctorId          String
+  doctor            User                @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  medications       String              // JSON array: [{name, dosage, frequency, duration}]
+  diagnosis         String
+  notes             String?
+  version           Int                 @default(1)
+  previousVersionId String?             // Links to previous prescription version
+  issuedAt          DateTime            @default(now())
+
+  @@index([consultationId])
+  @@index([doctorId])
+  @@index([issuedAt])
+}
+
+// Diagnostic test orders
+model DiagnosticTest {
+  id              String              @id @default(uuid())
+  consultationId  String
+  consultation    ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  orderedById     String
+  orderedBy       User                @relation("DoctorTests", fields: [orderedById], references: [id], onDelete: Cascade)
+  testName        String
+  instructions    String?
+  status          TestStatus          @default(ORDERED)
+  results         String?             // Test results (text or JSON)
+  orderedAt       DateTime            @default(now())
+  completedAt     DateTime?
+  updatedAt       DateTime            @updatedAt
+
+  @@index([consultationId])
+  @@index([orderedById])
+  @@index([status])
+}
+
+// Payment tracking (placeholder for external integration)
+model PaymentRecord {
+  id              String              @id @default(uuid())
+  consultationId  String
+  consultation    ConsultationSession @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  patientId       String
+  patient         User                @relation("PatientPayments", fields: [patientId], references: [id], onDelete: Cascade)
+  amount          Float
+  currency        String              @default("INR")
+  status          PaymentStatus       @default(PENDING)
+  paymentMethod   String?             // Placeholder for provider-specific data
+  transactionId   String?             // External provider transaction ID
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([consultationId])
+  @@index([patientId])
+  @@index([status])
+}
+
+// Audit log with selective metadata (NO PHI content)
+model AuditLog {
+  id                String   @id @default(uuid())
+  userId            String?  // Null for system actions
+  user              User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action            String   // LOGIN, CREATE_CONSULTATION, etc.
+  entityType        String   // ConsultationSession, Prescription, etc.
+  entityId          String?  // UUID of affected entity
+  fieldNamesChanged String?  // Comma-separated field names (NOT values)
+  metadata          Json?    // Flexible structured data (no PHI)
+  ipAddress         String?
+  userAgent         String?
+  timestamp         DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([entityType])
+  @@index([timestamp])
+}
+
+// Session management (7-day expiry)
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique  // Session token (stored in HTTP-only cookie)
+  csrfToken String   // CSRF protection token
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+}
