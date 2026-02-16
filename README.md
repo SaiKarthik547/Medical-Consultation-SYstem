@@ -23,19 +23,19 @@ This project is not just a web application; it is a **distributed system** desig
 
 ```mermaid
 graph TD
-    User[User (Patient/Doctor)] -->|HTTPS| CDN[CDN / Edge]
-    CDN -->|Load Balance| App[Next.js App Server]
+    User["User (Patient/Doctor)"] -->|HTTPS| CDN["CDN / Edge"]
+    CDN -->|Load Balance| App["Next.js App Server"]
     
-    subgraph Data Layer
-        App -->|Query/Transact| DB[(PostgreSQL Primary)]
-        App -->|Cache/Lock| Redis[(Redis Cluster)]
+    subgraph "Data Layer"
+        App -->|"Query/Transact"| DB[("PostgreSQL Primary")]
+        App -->|"Cache/Lock"| Redis[("Redis Cluster")]
     end
     
-    subgraph Async Processing
-        App -->|Dispatch Job| Queue[BullMQ Queue]
-        Queue -->|Poll| Worker[Worker Nodes]
+    subgraph "Async Processing"
+        App -->|"Dispatch Job"| Queue["BullMQ Queue"]
+        Queue -->|Poll| Worker["Worker Nodes"]
         Worker -->|Update| DB
-        Worker -->|Email/SMS| Notify[Notification Service]
+        Worker -->|"Email/SMS"| Notify["Notification Service"]
     end
 ```
 
